@@ -1,0 +1,7 @@
+streamlit>=1.38
+streamlit-autorefresh>=1.0.1
+pandas>=2.0
+requests>=2.31
+PyJWT>=2.8
+fastapi>=0.110
+uvicorn>=0.29
