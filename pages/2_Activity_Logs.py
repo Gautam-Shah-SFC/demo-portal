@@ -1,3 +1,5 @@
+import base64
+
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
@@ -85,13 +87,35 @@ for e in events:
         )
         prompt = record.get("prompt", "") or ""
         response = record.get("response", "") or ""
-        preview = prompt[:200] + ("…" if len(prompt) > 200 else "")
-        st.markdown(f'<div class="snippet"><b>Prompt:</b> {preview}</div>', unsafe_allow_html=True)
-        with st.expander("Show full prompt & response"):
+        attachments = record.get("attachments") or []
+
+        if prompt:
+            preview = prompt[:200] + ("…" if len(prompt) > 200 else "")
+        elif attachments:
+            preview = "_(no caption — image attachment only)_"
+        else:
+            preview = "_(empty)_"
+        attach_badge = f' <span class="badge" style="background:#374151">📎 {len(attachments)}</span>' if attachments else ""
+        st.markdown(f'<div class="snippet"><b>Prompt:</b> {preview}{attach_badge}</div>', unsafe_allow_html=True)
+
+        with st.expander(f"Show full prompt & response{f' + {len(attachments)} attachment(s)' if attachments else ''}"):
             st.markdown("**Prompt**")
-            st.write(prompt)
+            st.write(prompt if prompt else "_(no caption — image attachment only)_")
             st.markdown("**Response**")
             st.write(response if response else "_(no response captured)_")
+            if attachments:
+                st.markdown("**Attachments**")
+                cols = st.columns(min(len(attachments), 3) or 1)
+                for i, att in enumerate(attachments):
+                    with cols[i % len(cols)]:
+                        try:
+                            st.image(
+                                base64.b64decode(att["data_base64"]),
+                                caption=f'{att.get("filename", "attachment")} · {att.get("source", "?")}',
+                                use_container_width=True,
+                            )
+                        except Exception:
+                            st.caption(f'⚠️ Could not render {att.get("filename", "attachment")}')
     else:
         st.markdown(
             f'<div class="meta">window: {record.get("window_title", "—")} · '

@@ -176,10 +176,22 @@ A single batch can contain a mix of the two record shapes below — check which 
   "response": "the AI's reply",
   "prompt_length": 42,
   "response_length": 210,
-  "capture_details": {"settle_reason": "response_settled", "has_response": true}
+  "attachments": [
+    {
+      "mime_type": "image/png",
+      "filename": "pasted_image.png",
+      "source": "clipboard",
+      "size_bytes": 48213,
+      "sha256": "...",
+      "data_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
+    }
+  ],
+  "capture_details": {"settle_reason": "response_settled", "has_response": true, "has_attachments": true}
 }
 ```
 `provider` is one of the six keys above, or the real name of any `custom_apps`-added platform (e.g. `grok`, `perplexity`) derived from its matched domain/title. Falls back to `custom_ai` only if no usable name could be derived.
+
+**`attachments` is new** — images the user pasted (clipboard) or attached via the native file-picker dialog, alongside this turn. Always present as a field; an empty array `[]` for an ordinary text-only turn. `source` is either `"clipboard"` or `"file_dialog"`. `data_base64` is the raw image bytes, base64-encoded — decode and render as an `<img>`/`st.image` from that directly, no separate fetch needed. **A turn can have `prompt == ""` with a non-empty `attachments` list** — that's a real, valid case: the user sent an image with no caption at all. Don't treat an empty prompt as "nothing to show" for these rows. **Not captured**: drag-and-drop attachments — see the agent repo's `docs/KT_GUIDE.md` for why (investigated, not a simple gap).
 
 ### Record shape B: a security/detection alert (no AI reply involved)
 ```json
@@ -201,7 +213,8 @@ A single batch can contain a mix of the two record shapes below — check which 
 - **Timestamp**: absolute time plus a relative "X minutes/hours ago", recomputed client-side on an interval — in Streamlit, this means either `streamlit-autorefresh` or a manual refresh button, since the page won't update on its own once rendered.
 - **Sort order**: newest first, default and only order.
 - **Row content**: prompt/response preview (truncate long text, "show more" via `st.expander`), device/source app, tag + relative time.
-- Pagination or infinite scroll once volume grows — `st.dataframe`/`st.data_editor` handle basic paging reasonably; revisit if volume outgrows that.
+- **Attachments**: if `attachments` is non-empty, render each one as a thumbnail (`st.image(base64.b64decode(att["data_base64"]))`) inside the row/expander, with a small caption showing `filename` and `source`. Handle the image-only case explicitly in the layout — an empty `prompt` next to a rendered thumbnail is the normal, expected look for that row, not a missing-data bug.
+- Pagination or infinite scroll once volume grows — `st.dataframe`/`st.data_editor` handle basic paging reasonably; revisit if volume outgrows that. Note `data_base64` blobs make rows meaningfully heavier than a text-only feed — if using `st.dataframe` for the main table, keep attachments out of that table and render them only in the per-row expander, rather than loading every image up front.
 
 ---
 
@@ -217,6 +230,7 @@ Two separate ngrok tunnels are involved, one per direction — don't conflate th
 6. **Confirm the outbound direction works** — use an allowlisted app on the test device, confirm the record shows up in Activity Logs.
 7. **Confirm the inbound direction works** — on Provider Management, change what's active, including adding a `custom_apps` entry — save, confirm the already-running exe picks it up live.
 8. **Confirm domain matching** — push a `custom_apps` entry with `domain_pattern` (e.g. `grok.com`) for a site not in the fixed six, visit it on the test device, and confirm: (a) the event is captured and labeled with the correct domain-derived provider name, (b) the prompt is present, (c) the response is also present now (response-extraction is fixed) — flag it back only if response is empty even for the original six providers, which would indicate a real regression.
+9. **Confirm attachments** — on the test device, paste an image into a monitored chat with a caption, send, and confirm the record's `attachments` array has one entry that renders correctly; then send an image with no caption at all, and confirm that record too (empty `prompt`, non-empty `attachments`) — this is the case most likely to get skipped by an implementation that assumes every row has real prompt text. Drag-and-drop is expected to NOT show up as an attachment — that's correct, not a bug to chase.
 
 ---
 
@@ -226,8 +240,9 @@ Two separate ngrok tunnels are involved, one per direction — don't conflate th
 3. Login: one (or a few) demo users in a CSV, email/password check, issues a token on success.
 4. A device registry (name + base URL + which user/token it's using + a list of defined custom platforms per device) — CSV/JSON-blob is fine.
 5. Provider Management page: 6 checkboxes per device, plus one checkbox per defined custom platform, plus an "add custom platform" form offering a domain input for browser targets and a title-keyword input for IDE/desktop targets. Full-replace POST to `/publish` on Save.
-6. Activity Logs page: table/feed reading from the ingest store, tagged and sorted per the rules above, with an autorefresh or manual-refresh mechanism.
+6. Activity Logs page: table/feed reading from the ingest store, tagged and sorted per the rules above, with an autorefresh or manual-refresh mechanism, rendering `attachments` thumbnails per row (including the image-only, empty-prompt case).
 7. Flag back to the agent side if a `GET /status` endpoint is wanted, and/or if detection-alert rows (shape B) need a real provider tag.
+8. Storage note for `attachments`: base64 image blobs are meaningfully bigger than anything this store has held so far (up to ~11MB per image after base64 inflation of the agent's 8MB cap) — if using a CSV for the ingest store, this will get unwieldy fast; SQLite (already suggested as an option) handles it fine. Decide before volume makes it a problem, not after.
 
 ---
 
