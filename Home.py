@@ -50,7 +50,13 @@ if st.session_state.logged_in_user:
     st.success(f"Logged in as **{user['display_name']}** ({user['email']})")
 
     st.markdown('<span class="pill">DEVICE TOKEN</span>', unsafe_allow_html=True)
-    st.caption("Paste this into `agent_config.yaml` as `auth_header_value: \"Bearer <token>\"` before packaging a test device's exe.")
+    st.caption(
+        "Paste this into `agent_config.yaml` as `auth_header_value: \"Bearer <token>\"` before packaging "
+        "a test device's exe. The same token authenticates both outbound connections: the ingest "
+        "`backend_url` (unchanged) and the new `ws_url` (`wss://<this portal>/ws/agent`) that the device "
+        "opens for config-push — no separate per-device registration needed, it shows up on Provider "
+        "Management automatically once connected."
+    )
     st.code(st.session_state.token, language=None)
 
     col1, col2 = st.columns(2)

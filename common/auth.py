@@ -53,9 +53,11 @@ def issue_token(email: str, display_name: str) -> str:
     return jwt.encode(payload, _get_secret(), algorithm="HS256")
 
 
-def token_for_email(email: str) -> str | None:
-    users = load_users()
-    user = users.get(email.strip().lower())
-    if not user:
+def decode_token(token: str) -> dict | None:
+    try:
+        payload = jwt.decode(token, _get_secret(), algorithms=["HS256"])
+    except jwt.InvalidTokenError:
         return None
-    return issue_token(email, user["display_name"])
+    if "email" not in payload:
+        return None
+    return payload

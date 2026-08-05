@@ -9,6 +9,7 @@ Write-Host "Starting ingest server on port $IngestPort..."
 $ingest = Start-Process -FilePath $python -ArgumentList "-m","uvicorn","ingest_server.main:app","--host","0.0.0.0","--port","$IngestPort" -PassThru -WindowStyle Hidden
 
 try {
+    $env:INGEST_PORT = "$IngestPort"
     Write-Host "Starting Streamlit portal on port $PortalPort..."
     & $python -m streamlit run Home.py --server.port $PortalPort --server.address 0.0.0.0
 }

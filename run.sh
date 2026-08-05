@@ -3,6 +3,7 @@ set -euo pipefail
 
 INGEST_PORT="${1:-8000}"
 PORTAL_PORT="${2:-8501}"
+export INGEST_PORT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="$SCRIPT_DIR/venv/bin/python"

@@ -4,15 +4,17 @@ This is a handoff spec for building the Demo Portal website that talks to the en
 
 **Scope note (read this first)**: an earlier draft of this doc described a third page ("Review Queue") and a `network_flag`/`record_type` mechanism for detecting *unknown* AI platforms via network-level telemetry. That's the "Tier 2" idea from `modification_needed.md` — it was discussed and deliberately **deferred as a separate, larger initiative** (new native dependency, likely elevated-privilege requirement, not yet built). The agent has no network watcher, no `NetworkFlagEvent`, and never sends a `record_type` field. Don't build Page 3 or anything referencing it yet — see "Future (not yet built)" at the bottom for that design, kept for reference only.
 
+**Architecture change (read this too)**: the config-push direction (Provider Management → device) has moved from an inbound HTTP webhook to an **outbound WebSocket connection initiated by the device**. The old model required port 8765 reachable on every device (one ngrok tunnel per device, URL changing on every restart) — the new model needs the device to reach the portal, exactly like the ingest direction already does, and nothing more. See "Page 1" below for the full contract. **The ingest HTTP endpoint (`/api/ingest/activity`) and its FastAPI companion process are unchanged by this** — same envelope, same full-replace semantics, same everything; only the portal→agent transport changed, not agent→portal.
+
 ## Tech stack for this build: Streamlit (for now)
 
 Use **Streamlit** (Python) to build this. A few things worth planning around given Streamlit's specific model, so this doesn't turn into a surprise partway through:
 
 - **Streamlit is a reactive dashboard framework, not a general web server** — the whole script re-runs top-to-bottom on every user interaction. Use `st.session_state` for anything that needs to persist across reruns (login state, which device is selected, etc.), and Streamlit's built-in multi-page support (a `pages/` directory, one file per page — `pages/1_Provider_Management.py`, `pages/2_Activity_Logs.py`, etc.) for the Page 0/1/2 structure this doc describes.
-- **⚠️ The ingest endpoint (agent → portal) does NOT fit naturally into Streamlit.** Streamlit has no built-in way to expose a plain `POST /api/ingest/activity` route that accepts arbitrary JSON from an external HTTP client (the agent's `uploader.py` doesn't know or care about Streamlit — it just POSTs JSON to whatever URL is in `backend_url`). This needs to be handled as a **separate, small companion process**:
-  - Run a minimal **FastAPI** app (a few lines — one route, write incoming records to a shared SQLite file or CSV) alongside Streamlit, on a different port (`uvicorn`), and point the agent's `backend_url` at *that* process, not at Streamlit itself.
-  - The Streamlit app's Activity Logs page then just reads from that same shared store on each rerun (or on a timer — see below) — it never receives the POSTs directly.
-  - This is the one piece of real architecture this demo needs beyond "just Streamlit," and it's worth deciding early rather than discovering it partway through building Page 2.
+- **⚠️ Neither the ingest endpoint NOR the new config-push WebSocket fits naturally into Streamlit.** Streamlit has no built-in way to expose a plain `POST /api/ingest/activity` route, and no way to terminate a WebSocket connection either (no `@app.websocket(...)`-equivalent). Both need to be handled by a **separate, small companion process**:
+  - Run a minimal **FastAPI** app alongside Streamlit, on a different port (`uvicorn`), exposing (a) the ingest POST route (write incoming records to a shared SQLite file or CSV) and (b) a WebSocket route (`@app.websocket("/ws/agent")`) that devices connect to for config-push — see Page 1 below for that contract. Point the agent's `backend_url` and `ws_url` at *that* process, not at Streamlit itself.
+  - The Streamlit app's Activity Logs page then just reads from that same shared store on each rerun (or on a timer — see below) — it never receives the POSTs directly. The Provider Management page similarly never opens the WebSocket itself — it needs the FastAPI process to hold the live device connections and expose *some* way for Streamlit to trigger a push through it (simplest: Streamlit also just writes "desired state per device" to the same shared store, and the FastAPI process's WS handler reads from there when deciding what to push — avoids Streamlit and FastAPI needing to share in-memory Python objects across processes).
+  - This is the one piece of real architecture this demo needs beyond "just Streamlit," and it's worth deciding early rather than discovering it partway through building Page 1 or 2.
 - **Auto-refreshing the Activity Logs page** (for the "keeps counting up" relative-timestamp requirement, and for new events showing up without a manual reload) needs either the `streamlit-autorefresh` package or a manual "Refresh" button — Streamlit doesn't push updates to an open browser tab on its own.
 - Suggested minimal dependency list: `streamlit`, `pandas` (for the logs table), `requests` (for calling the agent's webhook from the portal side), plus `fastapi` + `uvicorn` for the companion ingest listener.
 
@@ -21,7 +23,7 @@ Use **Streamlit** (Python) to build this. A few things worth planning around giv
 There are two completely separate API calls involved, going in opposite directions. Don't confuse them:
 
 1. **Agent → Portal** (already working today): the agent ships captured events *to* the portal's ingest endpoint (the companion FastAPI process above). This is what feeds the **Logs page**.
-2. **Portal → Agent** (built, needs a UI): the portal pushes provider config changes *to* the agent's webhook listener, running on the device itself. This is what the **Provider Management page** needs to call — this direction *is* a natural fit for Streamlit, since it's just an outbound `requests.post()` triggered by a button click in server-side Python.
+2. **Portal → Agent, over a connection the AGENT opens** (built, needs a UI): every device opens an outbound WebSocket connection to the portal (`wss://<portal>/ws/agent`) and keeps it alive. Pushing a config change means the portal finds that device's already-open connection and sends a message down it — the portal never dials into the device. This is **not** a natural fit for a simple Streamlit button click the way a `requests.post()` to a device URL was — the live WS connections are held by the companion FastAPI process, not by Streamlit, so the Provider Management page's "Save" action needs to get its request to that process somehow (see the tech-stack note above for the simplest option: a shared store both processes read/write).
 
 ---
 
@@ -37,7 +39,7 @@ The JWT currently hardcoded into `agent_config.yaml` was cut from the **producti
 4. The portal displays that token (e.g. a "Device Token" screen with copy button) so it can be pasted into `agent_config.yaml`'s `auth_header_value` (`Bearer <token>`) before that test device's exe is built/packaged.
 5. From then on, that token is what:
    - the exe sends outbound on every upload to the demo ingest endpoint (`Authorization` header — already exactly how `auth_header_value` works, no agent-side change needed for this).
-   - the portal must send when calling *that device's* webhook (`/initialize`/`/publish`) — see the updated auth note in Page 1 below.
+   - the agent sends as the `Authorization` header on its outbound WebSocket connection attempt, and the portal must check for that same header/value when accepting that device's WS upgrade request — see the updated auth note in Page 1 below.
 
 ### Scope for now
 One demo user (e.g. John Doe), stored in a CSV, is enough to start: log in once, get a token, bake that token into one test exe, and verify the whole loop end to end before worrying about a real user database, multiple users, or multiple devices.
@@ -96,10 +98,10 @@ custom_platforms:
   - {label: "Grok", process_name: "chrome.exe", domain_pattern: "grok\\.com", enabled: true}
   - {label: "Perplexity", process_name: "chrome.exe", domain_pattern: "perplexity\\.ai", enabled: false}
 ```
-- **Adding a new custom platform** creates a new entry in this list for that device, `enabled: true` by default, and immediately fires a `/publish` including it.
+- **Adding a new custom platform** creates a new entry in this list for that device, `enabled: true` by default, and immediately sends a `publish` message including it down that device's live connection.
 - **Every subsequent visit to the page** renders one checkbox per entry in this list, in addition to the 6 fixed ones.
-- **Toggling any checkbox and hitting Save** recomputes the full `providers` list and the full `custom_apps` list (pulled from each *checked* custom entry's stored definition) and sends both in one `/publish` call — no new agent-side capability needed, purely how the portal builds the payload from its own remembered state.
-- Unchecking a custom platform just means the next `/publish` omits it — but keep its definition in the registry so it can be re-checked later without redefining it.
+- **Toggling any checkbox and hitting Save** recomputes the full `providers` list and the full `custom_apps` list (pulled from each *checked* custom entry's stored definition) and sends both in one `publish` message — no new agent-side capability needed, purely how the portal builds the message from its own remembered state.
+- Unchecking a custom platform just means the next `publish` message omits it — but keep its definition in the registry so it can be re-checked later without redefining it.
 
 ### UI
 - One row/card per device (see "Device registry" below), showing 6 checkboxes/toggles for the known providers, plus one checkbox per custom platform already defined for that device, plus an "add custom platform/IDE" form to define a new one.
@@ -109,42 +111,61 @@ custom_platforms:
 ### ⚠️ Critical semantic: full replace, not add/remove
 Despite the page being framed as "add or remove," the underlying API call is **not incremental**. Every call must include the **entire desired set** of active providers, not just the one being toggled. If the device currently has `["chatgpt", "cursor"]` active and the admin unchecks nothing but adds Gemini, the call must send `["chatgpt", "cursor", "gemini"]` — sending just `["gemini"]` would turn ChatGPT and Cursor **off**. The frontend must always compute and send the full checkbox state, never a delta.
 
-### API call to make (from the portal's backend, not the browser directly)
-```
-POST <device base URL from the registry>/publish
-Authorization: <auth_header_name>: <auth_header_value>
-Content-Type: application/json
+### The WebSocket contract (replaces the old `/publish` HTTP call)
 
+Every device connects **out** to `wss://<portal-host>/ws/agent` (this route must live in the companion FastAPI process — see the tech-stack note above — and stays open for as long as the agent runs, reconnecting with backoff if it drops). There is no more `/initialize` vs `/publish` distinction — both collapsed into a single message type once there's no separate path to disambiguate them by.
+
+**Auth happens once, at connection time**, not per message: the portal's WS route handler must read the `Authorization` header off the WebSocket upgrade request and reject the upgrade (close/refuse before accepting) if it's missing or doesn't match that device's expected token — the same shared-token model as before, just checked at handshake instead of per-POST. One real behavioral difference worth knowing: revoking a token no longer takes effect instantly for an already-connected device — it only takes effect the next time that device reconnects (with the now-invalid token, and gets rejected then). If instant revocation matters, the portal has to actively close that device's live connection when a token is revoked, not just wait for it to notice.
+
+Every JSON message, in both directions, carries a `"type"` field:
+
+**`hello`** (agent → portal, sent once immediately after connecting, before anything else):
+```json
 {
+  "type": "hello",
+  "device_id": "<a stable per-device identifier, unique to that install>",
+  "monitored_apps_hash": "<sha256 of that device's current monitored_apps.json bytes, or null if it doesn't have one yet>",
+  "connected_at": "<ISO-8601 UTC timestamp>"
+}
+```
+Use this to detect drift: remember the hash you last intentionally pushed to this `device_id`; if a device's `hello` shows a different hash (or the device reconnects after being offline for a while), that config push likely never landed — re-send it.
+
+**`publish`** (portal → agent — send this whenever "Save" is clicked, and also as the very first push to a brand-new device; there's no separate "first time" message anymore):
+```json
+{
+  "type": "publish",
+  "request_id": "<any string you want echoed back, optional>",
   "providers": ["chatgpt", "gemini", "cursor"],
   "custom_apps": [
     {"process_name": "chrome.exe", "domain_pattern": "grok\\.com"}
   ]
 }
 ```
-- Use `/initialize` instead of `/publish` for a device's first-ever config push; both do the exact same thing server-side.
-- Default port is `8765` on the device itself (configurable via `agent_config.yaml`'s `webhook_port`) — irrelevant when reaching a device through an ngrok tunnel, since the tunnel's own public URL is what gets called instead.
-- `auth_header_name`/`auth_header_value` are whatever's configured in that device's `agent_config.yaml` — the same token that user got at login (Page 0) and that's baked into that specific device's config. Per-user/per-device, so the portal needs to look up the right token for the device it's calling.
+Same full-replace semantics as before (see the warning above) — this doesn't change just because the connection is now persistent.
 
-### Responses to handle
-| Status | Meaning | Body |
-|--------|---------|------|
-| 200 | Applied successfully | `{"status": "ok", "active_providers": [...], "active_custom_apps": [...]}` |
-| 400 | Bad payload — missing/wrong-typed `providers`; a `custom_apps` entry missing/bad `process_name`; for a browser `process_name`, neither `domain_pattern` nor `window_title_pattern` provided, or `domain_pattern` isn't a valid regex; for a non-browser `process_name`, invalid `window_title_pattern` | `{"status": "error", "message": "..."}` (message identifies which entry/field) |
-| 401 | Auth header missing or wrong | `{"status": "error", "message": "unauthorized"}` |
-| 404 | Wrong path | `{"status": "error", "message": "not found"}` |
-| 500 | Device failed to persist the change | `{"status": "error", "message": "..."}` |
-| (no response / timeout) | Device unreachable — wrong host/port, firewall, or agent not running | handle as a network error |
+**`publish_result`** (agent → portal, the response to a `publish`):
+```json
+{"type": "publish_result", "request_id": "<echoed back>", "status": "ok", "active_providers": [...], "active_custom_apps": [...]}
+```
+or on a validation/apply failure:
+```json
+{"type": "publish_result", "request_id": "<echoed back>", "status": "error", "message": "..."}
+```
+`message` identifies which field/entry was bad, same validation rules as before (missing/wrong-typed `providers`; a `custom_apps` entry missing/bad `process_name`; for a browser `process_name`, neither `domain_pattern` nor `window_title_pattern` provided, or `domain_pattern` isn't a valid regex; for a non-browser `process_name`, invalid `window_title_pattern`).
 
-### Device registry (needed, doesn't exist yet)
-The agent has no self-registration or discovery mechanism. The portal needs its own simple table of known devices: a name/label, a base URL to reach it at, which user/token that device was built with, and its list of defined custom platforms — entered manually by whoever sets up a device. A CSV (or one small JSON blob per device) is fine for this too.
+Any message `type` your portal doesn't recognize gets logged and ignored by the agent, not treated as an error — so it's safe to add new message types later without needing every device rebuilt first.
 
-**Store a full base URL, not separate host+port fields.** For the ngrok-tunnel test topology, the portal only ever sees the tunnel's public URL (e.g. `https://abcd1234.ngrok-free.app`), not the device's own `webhook_port` (8765) directly. A free ngrok tunnel gets a **new random URL every time it's restarted** — whoever restarts the tunnel needs to update the registry entry each time.
+**If the device isn't currently connected** (offline, agent not running, network issue), there's no live socket to send a `publish` down — this is the WS-era equivalent of the old "no response / timeout" case. Treat it the same way: the portal should remember the desired state and either wait for the device's next `hello` to detect the drift (see above) and re-push then, or just show "device offline" and let the admin retry later.
 
-### Also needed on the agent side, not built yet (flagging, not blocking)
-There is currently **no way to ask a device "what's currently active"** — the webhook is push/write-only. If the checkboxes need to reflect true current state on page load, one of two things is needed:
-- Simplest: the portal treats its own last-pushed state as the source of truth and remembers it in its own store.
-- More correct: ask for a `GET /status` endpoint to be added to the agent's webhook listener. Flag this back if the demo needs it.
+### Device registry — now a *connection* registry, not a URL registry
+The agent still has no separate enrollment step — a device just shows up the first time it connects. The portal needs a table keyed by `device_id` (from `hello`) tracking: is this device *currently connected* (a live WS handle the FastAPI process holds in memory — if that process ever runs multiple worker processes, know that "which worker holds which device's socket" becomes a real problem needing sticky routing or a shared store like Redis; not an issue for a single-worker demo), which user/token it was built with, and its list of defined custom platforms (unchanged from before).
+
+**The old "store a full base URL per device" model, and the ngrok-URL-changes-on-every-restart pain that came with it, are both gone.** The device needs no public inbound endpoint at all anymore — delete that requirement from your setup notes entirely, not just the registry schema.
+
+### Still open: "what's this device's full current state" (reframed, not solved)
+`hello`'s connection-registry presence answers "is this device online right now" for free. It does **not**, by itself, answer "what's its full active-provider list" for populating checkboxes on page load — the hash only tells you whether it *matches* what you last pushed, not what it actually contains. Same two options as before:
+- Simplest: keep trusting the portal's own last-pushed state as the source of truth (now cross-checked against the `hello` hash for drift detection, which is new).
+- More correct: a `status` message type the agent could send on request — not built; flag back if the demo needs it.
 
 ---
 
@@ -220,28 +241,29 @@ A single batch can contain a mix of the two record shapes below — check which 
 
 ## End-to-end test flow (how this actually gets exercised)
 
-Two separate ngrok tunnels are involved, one per direction — don't conflate them:
+Only **one** tunnel is needed now — exposing the portal. The test device needs no public inbound endpoint at all anymore (that's the entire point of the WebSocket migration): it dials out to the portal for both directions, same as any normal outbound HTTPS/WSS client.
 
-1. **Tunnel 1 (exposes the portal)** — start the portal (both the Streamlit UI and the companion ingest process need to be reachable; either tunnel both ports, or put a reverse proxy in front locally and tunnel just that) on your machine, run `ngrok http <port>`. Note the public URL — this is what a test device's `backend_url` needs to point to (pointed at the ingest process specifically, not the Streamlit UI port).
+1. **Tunnel (exposes the portal)** — start the portal (the Streamlit UI, the companion ingest process, and the companion WS route all need to be reachable; either tunnel all the relevant ports, or put a reverse proxy in front locally and tunnel just that) on your machine, run `ngrok http <port>`. Note the public URL — a test device's `backend_url` and `ws_url` both need to point at this (the ingest/WS process specifically, not the Streamlit UI port; `ws_url` uses `wss://`, not `https://`).
 2. **Log in & get a token** — log into the portal (Page 0), copy the issued token.
-3. **Build the exe** — set `backend_url` to Tunnel 1's URL + ingest path, `auth_header_value` to `Bearer <token>`, package the exe.
-4. **Tunnel 2 (exposes the test device)** — copy the exe to the test device, run it, then run `ngrok http 8765` on the test device itself. Independent from Tunnel 1.
-5. **Register the device** — add a new device entry in the portal, set its URL to Tunnel 2's URL.
-6. **Confirm the outbound direction works** — use an allowlisted app on the test device, confirm the record shows up in Activity Logs.
-7. **Confirm the inbound direction works** — on Provider Management, change what's active, including adding a `custom_apps` entry — save, confirm the already-running exe picks it up live.
+3. **Build the exe** — set `backend_url` to `<tunnel URL>/api/ingest/activity`, `ws_url` to `wss://<tunnel host>/ws/agent`, `auth_header_value` to `Bearer <token>`, package the exe.
+4. **Run it on the test device** — no tunnel, no port-forwarding, no registration step needed on the device side at all. It connects out on its own.
+5. **Confirm the device shows up as connected** — the portal should see a `hello` message and register the device (by `device_id`) as online.
+6. **Confirm the outbound (ingest) direction works** — use an allowlisted app on the test device, confirm the record shows up in Activity Logs.
+7. **Confirm the inbound (config-push) direction works** — on Provider Management, change what's active, including adding a `custom_apps` entry — save, confirm the already-running exe picks it up live (check `agent.log` for `publish` received / `publish_result` sent).
 8. **Confirm domain matching** — push a `custom_apps` entry with `domain_pattern` (e.g. `grok.com`) for a site not in the fixed six, visit it on the test device, and confirm: (a) the event is captured and labeled with the correct domain-derived provider name, (b) the prompt is present, (c) the response is also present now (response-extraction is fixed) — flag it back only if response is empty even for the original six providers, which would indicate a real regression.
 9. **Confirm attachments** — on the test device, paste an image into a monitored chat with a caption, send, and confirm the record's `attachments` array has one entry that renders correctly; then send an image with no caption at all, and confirm that record too (empty `prompt`, non-empty `attachments`) — this is the case most likely to get skipped by an implementation that assumes every row has real prompt text. Drag-and-drop is expected to NOT show up as an attachment — that's correct, not a bug to chase.
+10. **Confirm reconnection** — kill the test device's network briefly (or restart the agent), confirm it reconnects with visible backoff in `agent.log`, and that a `publish` sent while it was disconnected either gets picked up via the `hello`-hash drift check on reconnect, or is at least clearly visible as "device was offline" in the portal rather than silently lost.
 
 ---
 
 ## Summary of what needs building
 1. **Streamlit app** with Page 0 (login), Page 1 (Provider Management), Page 2 (Activity Logs), using `st.session_state` and the multi-page `pages/` convention.
-2. **A small companion FastAPI process** (run via `uvicorn`) for the ingest endpoint, writing to a store (CSV/SQLite) that the Streamlit Activity Logs page reads from — this is the one piece that doesn't fit inside Streamlit itself, decide this early.
+2. **A small companion FastAPI process** (run via `uvicorn`) exposing (a) the ingest POST route, writing to a store (CSV/SQLite) that the Streamlit Activity Logs page reads from, and (b) the `wss://.../ws/agent` route that devices connect to for config-push (see Page 1) — this is the piece that doesn't fit inside Streamlit itself, decide this early; it now does more than just ingest.
 3. Login: one (or a few) demo users in a CSV, email/password check, issues a token on success.
-4. A device registry (name + base URL + which user/token it's using + a list of defined custom platforms per device) — CSV/JSON-blob is fine.
-5. Provider Management page: 6 checkboxes per device, plus one checkbox per defined custom platform, plus an "add custom platform" form offering a domain input for browser targets and a title-keyword input for IDE/desktop targets. Full-replace POST to `/publish` on Save.
+4. A **connection registry** keyed by `device_id` (which user/token it's using + a list of defined custom platforms per device + whether it's currently connected) — CSV/JSON-blob is fine. No base URL field needed anymore — devices aren't reached by URL.
+5. Provider Management page: 6 checkboxes per device, plus one checkbox per defined custom platform, plus an "add custom platform" form offering a domain input for browser targets and a title-keyword input for IDE/desktop targets. Full-replace `publish` message sent down that device's live WS connection on Save.
 6. Activity Logs page: table/feed reading from the ingest store, tagged and sorted per the rules above, with an autorefresh or manual-refresh mechanism, rendering `attachments` thumbnails per row (including the image-only, empty-prompt case).
-7. Flag back to the agent side if a `GET /status` endpoint is wanted, and/or if detection-alert rows (shape B) need a real provider tag.
+7. Flag back to the agent side if a device `status` message type is wanted, and/or if detection-alert rows (shape B) need a real provider tag.
 8. Storage note for `attachments`: base64 image blobs are meaningfully bigger than anything this store has held so far (up to ~11MB per image after base64 inflation of the agent's 8MB cap) — if using a CSV for the ingest store, this will get unwieldy fast; SQLite (already suggested as an option) handles it fine. Decide before volume makes it a problem, not after.
 
 ---
