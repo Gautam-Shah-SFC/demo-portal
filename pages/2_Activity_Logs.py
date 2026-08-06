@@ -38,6 +38,12 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+ATTACHMENT_SOURCE_LABELS = {
+    "clipboard": ("📋", "Pasted"),
+    "file_dialog": ("📁", "Attached"),
+    "ai_generated": ("🤖", "AI-generated — screenshot, not the model's original bytes"),
+}
+
 st.title("📜 Activity Logs")
 st.caption("Every captured event received from all devices — newest first.")
 
@@ -95,7 +101,13 @@ for e in events:
             preview = "_(no caption — image attachment only)_"
         else:
             preview = "_(empty)_"
-        attach_badge = f' <span class="badge" style="background:#374151">📎 {len(attachments)}</span>' if attachments else ""
+        has_ai_generated = any(a.get("source") == "ai_generated" for a in attachments)
+        if attachments and has_ai_generated:
+            attach_badge = f' <span class="badge" style="background:#7C3AED">🤖 {len(attachments)} incl. AI-generated</span>'
+        elif attachments:
+            attach_badge = f' <span class="badge" style="background:#374151">📎 {len(attachments)}</span>'
+        else:
+            attach_badge = ""
         st.markdown(f'<div class="snippet"><b>Prompt:</b> {preview}{attach_badge}</div>', unsafe_allow_html=True)
 
         with st.expander(f"Show full prompt & response{f' + {len(attachments)} attachment(s)' if attachments else ''}"):
@@ -108,10 +120,19 @@ for e in events:
                 cols = st.columns(min(len(attachments), 3) or 1)
                 for i, att in enumerate(attachments):
                     with cols[i % len(cols)]:
+                        source = att.get("source", "")
+                        emoji, label = ATTACHMENT_SOURCE_LABELS.get(source, ("📎", source or "unknown source"))
+                        if source == "ai_generated":
+                            st.markdown(
+                                f'<span class="badge" style="background:#7C3AED">{emoji} {label}</span>',
+                                unsafe_allow_html=True,
+                            )
+                        else:
+                            st.caption(f"{emoji} {label}")
                         try:
                             st.image(
                                 base64.b64decode(att["data_base64"]),
-                                caption=f'{att.get("filename", "attachment")} · {att.get("source", "?")}',
+                                caption=att.get("filename", "attachment"),
                                 use_container_width=True,
                             )
                         except Exception:
