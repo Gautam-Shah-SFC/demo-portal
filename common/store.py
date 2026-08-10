@@ -20,7 +20,24 @@ def _conn() -> sqlite3.Connection:
         )
         """
     )
+    _ensure_schema(conn)
     return conn
+
+
+def _ensure_schema(conn: sqlite3.Connection) -> None:
+    # Additive-only migration: source_type/external_id back the ServiceNow
+    # connector's idempotent upsert (see upsert_record). Left NULL for every
+    # existing/agent-path row, so insert_records()/fetch_events() behavior for
+    # the agent pipeline is completely unaffected.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(events)").fetchall()}
+    if "source_type" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN source_type TEXT")
+    if "external_id" not in cols:
+        conn.execute("ALTER TABLE events ADD COLUMN external_id TEXT")
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source_external "
+        "ON events(source_type, external_id) WHERE external_id IS NOT NULL"
+    )
 
 
 def init_db() -> None:
@@ -48,6 +65,36 @@ def insert_records(records: list[dict]) -> int:
     conn.commit()
     conn.close()
     return len(rows)
+
+
+def upsert_record(record: dict, source_type: str, external_id: str) -> None:
+    """Idempotent insert-or-update keyed on (source_type, external_id) — used
+    by the ServiceNow connector so re-polling an overlapping watermark window
+    (or a retried batch) never creates duplicate rows. The agent ingestion
+    path keeps using insert_records() and never dedupes, unchanged."""
+    conn = _conn()
+    now = datetime.now(timezone.utc).isoformat()
+    is_conversation = "prompt" in record or "response" in record
+    kind = "conversation" if is_conversation else "alert"
+    event_time = record.get("captured_at") or record.get("timestamp") or now
+    provider_key = record.get("provider")
+    provider_display = record.get("provider_display_name") or record.get("provider") or "Unknown"
+    conn.execute(
+        """
+        INSERT INTO events (received_at, kind, event_time, provider_key, provider_display, raw_json, source_type, external_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source_type, external_id) WHERE external_id IS NOT NULL DO UPDATE SET
+            received_at=excluded.received_at,
+            kind=excluded.kind,
+            event_time=excluded.event_time,
+            provider_key=excluded.provider_key,
+            provider_display=excluded.provider_display,
+            raw_json=excluded.raw_json
+        """,
+        (now, kind, event_time, provider_key, provider_display, json.dumps(record), source_type, external_id),
+    )
+    conn.commit()
+    conn.close()
 
 
 def fetch_events(limit: int = 500) -> list[dict]:

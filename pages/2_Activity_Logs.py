@@ -59,9 +59,15 @@ if autorefresh_on:
 
 events = fetch_events(limit=500)
 
-kind_filter = st.multiselect("Filter by type", options=["conversation", "alert"],
-                              default=["conversation", "alert"])
-events = [e for e in events if e["kind"] in kind_filter]
+filter_l, filter_r = st.columns(2)
+with filter_l:
+    kind_filter = st.multiselect("Filter by type", options=["conversation", "alert"],
+                                  default=["conversation", "alert"])
+    events = [e for e in events if e["kind"] in kind_filter]
+with filter_r:
+    source_options = sorted({e["provider_display"] or "Unknown" for e in events})
+    source_filter = st.multiselect("Filter by source", options=source_options, default=source_options)
+    events = [e for e in events if (e["provider_display"] or "Unknown") in source_filter]
 
 st.metric("Total events shown", len(events))
 st.divider()
@@ -86,11 +92,14 @@ for e in events:
     )
 
     if kind == "conversation":
-        st.markdown(
-            f'<div class="meta">device page: {record.get("page_title", "—")} · '
-            f'{record.get("url", "")}</div>',
-            unsafe_allow_html=True,
-        )
+        meta_bits = []
+        if record.get("page_title"):
+            meta_bits.append(f'page: {record["page_title"]}')
+        if record.get("url"):
+            meta_bits.append(record["url"])
+        if record.get("source_subtype"):
+            meta_bits.append(f'subtype: {record["source_subtype"]}')
+        st.markdown(f'<div class="meta">{" · ".join(meta_bits) or "—"}</div>', unsafe_allow_html=True)
         prompt = record.get("prompt", "") or ""
         response = record.get("response", "") or ""
         attachments = record.get("attachments") or []

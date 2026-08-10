@@ -13,12 +13,22 @@ ALERT_COLOR = "#EF4444"
 CUSTOM_COLOR = "#F59E0B"
 FALLBACK_COLOR = "#6B7280"
 
+# Colors for ingestion sources that aren't one of the 6 device-monitored
+# providers above (so they don't show up as a 7th Provider Management
+# checkbox) but still deserve a distinct Activity Logs badge instead of the
+# generic "custom platform" amber.
+SOURCE_COLORS = {
+    "servicenow": "#2E7D32",
+}
+
 
 def color_for(provider_key: str | None, display_name: str | None, kind: str) -> str:
     if kind == "alert":
         return ALERT_COLOR
     if provider_key and provider_key in PROVIDERS:
         return PROVIDERS[provider_key]["color"]
+    if provider_key and provider_key in SOURCE_COLORS:
+        return SOURCE_COLORS[provider_key]
     if provider_key or display_name:
         return CUSTOM_COLOR
     return FALLBACK_COLOR
